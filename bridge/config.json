@@ -1,0 +1,25 @@
+{
+  "host": "0.0.0.0",
+  "port": 8765,
+  "public_base": "",
+  "token": "",
+  "music_dirs": ["../music"],
+  "extensions": [".mp3", ".flac", ".m4a", ".aac", ".wav", ".ogg", ".opus"],
+  "transcode_dir": "../cache",
+  "state_file": "../state.json",
+  "ffmpeg": "../vendor/ffmpeg/bin/ffmpeg.exe",
+  "tunnel_logs": ["../logs/cloudflared.err"],
+  "source": {
+    "preferLocal": true
+  },
+  "plugin": {
+    "enabled": true,
+    "path": "../plugins/musicfree-netease-plugin.js",
+    "timeout": 12,
+    "userVariables": {
+      "cookie": "",
+      "bilibiliFallback": "1",
+      "bilibiliMp4": "0"
+    }
+  }
+}

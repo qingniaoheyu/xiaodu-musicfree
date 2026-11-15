@@ -1,0 +1,32 @@
+# ===== Sensitive credentials (never commit) =====
+mcp_token.json
+device_code.json
+device.json
+*.token
+*.secret
+
+# ===== Runtime artifacts =====
+state.json
+logs/
+cache/
+music/
+__pycache__/
+*.pyc
+*.log
+*.err
+*.out
+
+# ===== Local audio =====
+*.mp3
+*.flac
+*.wav
+*.m4a
+*.aac
+*.ogg
+*.opus
+
+# ===== vendor directory: third-party deps + debug scripts, do NOT commit =====
+vendor/
+
+# ===== Temp files =====
+tmp_*.py
