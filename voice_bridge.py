@@ -43,6 +43,11 @@ NEXT_WORDS = ["下一首", "下一曲", "切歌", "换一首", "下一"]
 PREV_WORDS = ["上一首", "上一曲", "回到上一首", "上一"]
 STOP_WORDS = ["停止", "别放了", "不听了", "停"]
 
+# 连播检查周期（秒）
+POLL_SEC = 5
+# 推歌后的冷却期（秒）：这段时间内不判"播完"，避免设备还没开始播就误判
+COOLDOWN_SEC = 15
+
 
 class Player:
     def __init__(self, client):
@@ -52,6 +57,8 @@ class Player:
         self.playing = False
         self.current_url = ""
         self.current_duration_ms = 0
+        self.last_push_ts = 0          # 上次推歌时间（用于冷却）
+        self._null_audio_count = 0     # 连续几次查到 audio=null
         self._prefetch_lock = threading.Lock()
         self._prefetched = {}  # index -> url
 
@@ -107,6 +114,8 @@ class Player:
         self.current_url = url
         self.current_duration_ms = int(item.get("duration_ms", 0) or 0)
         self.playing = True
+        self.last_push_ts = time.time()
+        self._null_audio_count = 0
         self.push_url(url)
         print(f"  ▶ 播放[{i+1}/{len(self.queue)}] {item['title']} - {item['artist']}")
         self.speak(f"正在为你播放{item['title']}")
@@ -152,10 +161,15 @@ class Player:
             return self.play_index(self.index - 1)
         return False
 
-    def stop(self):
+    def stop(self, *, reason=""):
+        """停止播放并清空队列（离线/用户停止都调用，防止设备回来后自动补播）。"""
         self.playing = False
-        self.speak("好的，已停止")
-        print("  ■ 已停止")
+        self.queue = []
+        self.index = -1
+        self._prefetched = {}
+        if not reason:
+            self.speak("好的，已停止")
+        print(f"  ■ 已停止{('（' + reason + '）') if reason else ''}，队列已清空")
 
     def load_playlist(self, song=None, mode=None):
         if mode == "newsongs":
@@ -172,14 +186,33 @@ class Player:
         print(f"  队列就绪，{len(items)} 首")
         return len(items) > 0
 
-    def device_audio_state(self):
+    def device_status(self):
+        """返回完整设备状态 dict；失败返回 None。"""
         try:
-            st = self.client.call_tool("xiaodu_get_device_status", {
+            return self.client.call_tool("xiaodu_get_device_status", {
                 "cuid": CUID, "client_id": CLIENT_ID,
             })
-            return (st.get("audio") or {})
         except Exception:
-            return {}
+            return None
+
+    def device_online(self):
+        """用 list_user_devices 判断设备是否在线（关机时最可靠）。
+
+        设备关机/离线时：online_status=false 或直接从列表消失。
+        返回 True 仅当设备明确在线。
+        """
+        try:
+            d = self.client.call_tool("list_user_devices", {})
+        except Exception:
+            return False
+        # 可能是单个 dict 或列表
+        devices = d if isinstance(d, list) else [d] if isinstance(d, dict) else []
+        for dev in devices:
+            if not isinstance(dev, dict):
+                continue
+            if dev.get("cuid") == CUID:
+                return bool(dev.get("online_status", False))
+        return False
 
 
 def load_token():
@@ -275,22 +308,44 @@ def main():
                 elif cmd == "stop":
                     player.stop()
 
-            # 连播检查
+            # 连播检查（仅在有播放会话时进行）
             now = time.time()
-            if player.playing and (now - last_progress_check) > 5:
+            if player.playing and (now - last_progress_check) >= POLL_SEC:
                 last_progress_check = now
-                audio = player.device_audio_state()
-                activity = audio.get("activity", "")
-                offset = audio.get("offset_ms", 0) or 0
-                dur = player.current_duration_ms or 0
+
+                # 主闸门：设备必须在线。关机/离线立刻停止连播并清空队列，
+                # 等设备回来也不会自动补播（需重新点歌）。
+                if not player.device_online():
+                    print("  ⚠ 设备离线/关机 → 停止连播，清空队列")
+                    player.stop(reason="设备离线")
+                    continue
+
+                # 冷却期：推歌后 COOLDOWN_SEC 秒内不判播完，避免设备还没
+                # 开始播就因云端旧状态/抖动被误判。
+                if now - player.last_push_ts < COOLDOWN_SEC:
+                    continue
+
+                st = player.device_status()
+                audio = (st.get("audio") if isinstance(st, dict) else None)
+
+                # audio=null：设备已无播放会话。连续多次确认才停，
+                # 避免云端状态瞬时抖动误杀。
+                if not audio or not isinstance(audio, dict):
+                    player._null_audio_count += 1
+                    if player._null_audio_count >= 2:
+                        print("  ⚠ 设备已无播放会话 → 停止连播，清空队列")
+                        player.stop(reason="播放会话已结束")
+                    continue
+                player._null_audio_count = 0
+
+                activity = audio.get("activity", "") or ""
+                # 只有明确结束态才算播完；不再用 offset_ms 猜，
+                # 因为关机后云端 offset 是残留值，会误判成"播到结尾"。
                 finished = activity in ("FINISHED", "IDLE", "STOPPED")
-                if not finished and dur > 0 and offset > 0 and offset >= dur - 5000:
-                    finished = True
                 if finished:
                     print(f"  ◀ 当前曲播完 (activity={activity})")
                     if not player.next():
-                        player.playing = False
-                        print("  队列播完")
+                        player.stop(reason="队列播完")
 
         except Exception as e:
             print(f"[错误] {e}")
